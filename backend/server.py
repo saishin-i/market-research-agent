@@ -19,7 +19,8 @@ from langchain_core.runnables import RunnableLambda
 from langserve import add_routes
 from pydantic import BaseModel, Field
 
-from .graph import close_db, new_thread_id, run_resume, run_start
+from fastapi import HTTPException
+from .graph import close_db, graph, new_thread_id, run_resume, run_start
 
 
 @asynccontextmanager
@@ -63,6 +64,33 @@ def _handle(req: AgentRequest | dict) -> dict:
         data = run_resume(decision=decision, thread_id=tid)
 
     return {"thread_id": tid, **data}
+
+
+# --- ステータス取得（フロントエンドのポーリング用）---
+@app.get("/agent/status/{thread_id}")
+def get_status(thread_id: str) -> dict:
+    """
+    フロントエンドが2秒ごとにポーリングするエンドポイント。
+    SQLite チェックポイントから現在の実行ステップを取得して返す。
+
+    current_step は各ノードが state に書き込む文字列で、
+    グラフが進むたびに更新される。
+    """
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        state = graph.get_state(config)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    if state is None or not state.values:
+        return {"current_step": None, "is_interrupted": False}
+
+    current_step = state.values.get("current_step") or None
+    # interrupt 中かどうかは tasks の interrupts で判定する
+    is_interrupted = any(
+        getattr(t, "interrupts", None) for t in (state.tasks or [])
+    )
+    return {"current_step": current_step, "is_interrupted": is_interrupted}
 
 
 # LangServe が /agent/invoke などのエンドポイントを自動生成する
